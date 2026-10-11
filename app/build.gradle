@@ -1,0 +1,67 @@
+plugins {
+    id "com.android.application"
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+def signingValue = { String propertyName, String environmentName ->
+    keystoreProperties.getProperty(propertyName) ?: System.getenv(environmentName)
+}
+
+def releaseStoreFile = signingValue("storeFile", "ANDROID_SIGNING_KEYSTORE_FILE")
+def releaseStorePassword = signingValue("storePassword", "ANDROID_SIGNING_STORE_PASSWORD")
+def releaseKeyAlias = signingValue("keyAlias", "ANDROID_SIGNING_KEY_ALIAS")
+def releaseKeyPassword = signingValue("keyPassword", "ANDROID_SIGNING_KEY_PASSWORD")
+def releaseSigningConfigured = [
+        releaseStoreFile,
+        releaseStorePassword,
+        releaseKeyAlias,
+        releaseKeyPassword,
+].every { it != null && !it.trim().isEmpty() }
+
+android {
+    namespace "io.github.megaboy2k.airdroidwakecontrol"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.megaboy2k.airdroidwakecontrol"
+        minSdk 26
+        targetSdk 35
+        versionCode 10
+        versionName "0.10.0"
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach {
+            outputFileName = "AirDroid-Wake-Control-${variant.versionName}-${variant.buildType.name}.apk"
+        }
+    }
+}
+
+dependencies {
+    compileOnly files("libs/xposed-api-82.jar")
+}

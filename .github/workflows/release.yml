@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "[0-9]*-[0-9]*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signed-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+
+      - name: Validate tag and signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_code="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]+([0-9]+).*$/\1/p' app/build.gradle)"
+          version_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]+\"([^\"]+)\".*$/\1/p' app/build.gradle)"
+          expected_tag="${version_code}-${version_name}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match ${expected_tag} from app/build.gradle" >&2
+            exit 1
+          fi
+          for name in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_SIGNING_STORE_PASSWORD \
+            ANDROID_SIGNING_KEY_ALIAS \
+            ANDROID_SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required GitHub Actions secret ${name} is missing" >&2
+              exit 1
+            fi
+          done
+
+      - name: Restore signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        shell: bash
+        run: printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/release.jks"
+
+      - name: Build signed release APK
+        env:
+          ANDROID_SIGNING_KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon clean lintRelease assembleRelease
+
+      - name: Verify signature and create checksum
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -name '*-release.apk' -print -quit)"
+          if [[ -z "${apk}" ]]; then
+            echo "Release APK was not produced" >&2
+            exit 1
+          fi
+          apksigner="$(find "${ANDROID_HOME}/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
+          "${apksigner}" verify --verbose --print-certs "${apk}"
+          checksum="${apk}.sha256"
+          (
+            cd "$(dirname "${apk}")"
+            sha256sum "$(basename "${apk}")" > "$(basename "${checksum}")"
+          )
+          echo "apk=${apk}" >> "${GITHUB_OUTPUT}"
+          echo "checksum=${checksum}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirDroid-Wake-Control-${{ github.ref_name }}
+          path: |
+            ${{ steps.apk.outputs.apk }}
+            ${{ steps.apk.outputs.checksum }}
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          "${{ steps.apk.outputs.apk }}"
+          "${{ steps.apk.outputs.checksum }}"
+          --verify-tag
+          --generate-notes
+          --title "AirDroid Wake Control ${GITHUB_REF_NAME}"

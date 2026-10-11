@@ -1,0 +1,10 @@
+AirDroid Wake Control
+Copyright 2026 megaboy2k
+
+This product includes the Xposed Framework API 82 JAR for compile-time use.
+XposedBridge is Copyright 2013 rovo89 and Tungstwenty and is licensed under
+the Apache License, Version 2.0. The API classes are not packaged into the
+module APK.
+
+AirDroid is a trademark of Sand Studio. This project is independent and is
+not affiliated with or endorsed by Sand Studio, OnePlus, Vector, or LSPosed.

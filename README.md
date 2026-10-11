@@ -150,6 +150,12 @@ capable of destabilizing Android or causing a boot loop.
 AirDroid is a trademark of Sand Studio. This independent project is not
 affiliated with or endorsed by Sand Studio, OnePlus, Vector, or LSPosed.
 
+## Contact
+
+For personal questions that are not suitable for public Issues or Discussions,
+contact [megaboy2k](mailto:ksy.megaboy@gmail.com). Please use Issues for bug
+reports so that troubleshooting information remains available to other users.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

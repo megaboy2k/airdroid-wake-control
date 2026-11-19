@@ -12,6 +12,7 @@ import android.os.SystemClock;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.lang.reflect.Method;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -32,7 +33,7 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
     private static final long BLACKOUT_TIMEOUT_MS = 10000L;
     private static final Object BLACKOUT_LOCK = new Object();
     private static final Set<Object> BLACKOUT_WAKE_LOCKS = new HashSet<>();
-    private static float savedBrightnessOverride = Float.NaN;
+    private static Number savedBrightnessOverride;
     private static boolean panelBlackoutLogged;
     private static boolean blackoutActive;
     private static boolean blackoutEnding;
@@ -96,8 +97,10 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
                         int remoteImeState = getRemoteImeState(param.thisObject);
                         boolean camera = normalizedTag.contains("initwebrtccameraactivity");
                         boolean genericWebRtc = "webrtc".equals(normalizedTag);
+                        boolean taggedRemoteControl = "webrtc_screen".equals(normalizedTag);
                         boolean remoteControl = remoteImeState
-                                == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+                                == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                                || taggedRemoteControl;
 
                         boolean shouldBlockWake = addonSmartService
                                 ? !remoteControl
@@ -123,10 +126,11 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
                             // its accessibility helper. Brightness zero keeps the OLED panel black.
                             log("BLACKOUT", sourcePackage, tag, flags, remoteImeState);
                         } else {
-                            // If the device-specific brightness override ever fails, retain the
-                            // previous safe behavior and do not illuminate the display.
-                            param.args[flagsIndex] = flags & ~ACQUIRE_CAUSES_WAKEUP;
-                            log("BLOCK_FALLBACK", sourcePackage, tag, flags, remoteImeState);
+                            // Fail open. Blocking ACQUIRE_CAUSES_WAKEUP after AirDroid has
+                            // initialized its privileged input helper can leave Remote Control in
+                            // a half-started state on Android 10.
+                            log("ALLOW_BLACKOUT_FAILED", sourcePackage, tag, flags,
+                                    remoteImeState);
                         }
                     }
                 });
@@ -148,20 +152,35 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
         XposedBridge.hookAllMethods(photonicModulator, "setState", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (!isBlackoutActive() || param.args.length < 3
-                        || !(param.args[1] instanceof Float)
-                        || !(param.args[2] instanceof Float)) {
+                if (!isBlackoutActive()) {
                     return;
                 }
-                // On this OxygenOS build 0 is clamped to panel minimum (16). The
-                // display pipeline uses -1 while keeping state=ON during color fade.
-                param.args[1] = -1.0f;
-                param.args[2] = -1.0f;
+
+                final String brightnessType;
+                if (param.args.length >= 2 && param.args[1] instanceof Integer) {
+                    // Android 10: setState(int state, int backlight). Zero is the explicit
+                    // BRIGHTNESS_OFF value and prevents the initial panel flash while the
+                    // logical display remains interactive for MediaProjection startup.
+                    param.args[1] = 0;
+                    brightnessType = "int";
+                } else if (param.args.length >= 3
+                        && param.args[1] instanceof Float
+                        && param.args[2] instanceof Float) {
+                    // Newer OxygenOS: zero is clamped to panel minimum. This display pipeline
+                    // uses -1 while keeping state=ON during color fade.
+                    param.args[1] = -1.0f;
+                    param.args[2] = -1.0f;
+                    brightnessType = "float";
+                } else {
+                    return;
+                }
+
                 synchronized (BLACKOUT_LOCK) {
                     if (!panelBlackoutLogged) {
                         panelBlackoutLogged = true;
                         XposedBridge.log(
-                                "AirDroidWakeControl: PANEL backlight forced off");
+                                "AirDroidWakeControl: PANEL backlight forced off type="
+                                        + brightnessType);
                     }
                 }
             }
@@ -274,6 +293,7 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
     private static boolean startBlackout(Object powerManagerService, Object wakeLockToken) {
         final boolean newSession;
         final long generation;
+        final Number blackoutBrightness;
         try {
             synchronized (BLACKOUT_LOCK) {
                 if (blackoutEnding) {
@@ -281,8 +301,14 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
                 }
                 newSession = !blackoutActive;
                 if (newSession) {
-                    savedBrightnessOverride = XposedHelpers.getFloatField(
+                    Object brightnessOverride = XposedHelpers.getObjectField(
                             powerManagerService, "mScreenBrightnessOverrideFromWindowManager");
+                    if (!(brightnessOverride instanceof Number)) {
+                        throw new IllegalStateException("unexpected brightness override type: "
+                                + (brightnessOverride == null
+                                ? "null" : brightnessOverride.getClass().getName()));
+                    }
+                    savedBrightnessOverride = (Number) brightnessOverride;
                     panelBlackoutLogged = false;
                     blackoutActive = true;
                     blackoutPowerManagerService = powerManagerService;
@@ -290,10 +316,13 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
                 }
                 BLACKOUT_WAKE_LOCKS.add(wakeLockToken);
                 generation = blackoutGeneration;
-                if (newSession) {
-                    XposedHelpers.callMethod(powerManagerService,
-                            "setScreenBrightnessOverrideFromWindowManagerInternal", 0.0f);
-                }
+                blackoutBrightness = newSession
+                        ? zeroBrightnessFor(savedBrightnessOverride) : null;
+            }
+            if (newSession) {
+                // Do not call into PowerManager while holding BLACKOUT_LOCK. Display updates can
+                // synchronously reach the PhotonicModulator hook on older OxygenOS builds.
+                setBrightnessOverride(powerManagerService, blackoutBrightness);
             }
             if (newSession) {
                 new Handler(Looper.getMainLooper()).postDelayed(
@@ -305,7 +334,7 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
             synchronized (BLACKOUT_LOCK) {
                 BLACKOUT_WAKE_LOCKS.remove(wakeLockToken);
                 if (BLACKOUT_WAKE_LOCKS.isEmpty()) {
-                    savedBrightnessOverride = Float.NaN;
+                    savedBrightnessOverride = null;
                     panelBlackoutLogged = false;
                     blackoutActive = false;
                     blackoutEnding = false;
@@ -333,7 +362,7 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
 
     private static void endBlackout(final Object powerManagerService,
             long generation, String reason) {
-        final float brightnessToRestore;
+        final Number brightnessToRestore;
         synchronized (BLACKOUT_LOCK) {
             if (!blackoutActive || blackoutEnding
                     || generation != blackoutGeneration
@@ -359,9 +388,7 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
 
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 try {
-                    XposedHelpers.callMethod(powerManagerService,
-                            "setScreenBrightnessOverrideFromWindowManagerInternal",
-                            brightnessToRestore);
+                    setBrightnessOverride(powerManagerService, brightnessToRestore);
                     XposedBridge.log("AirDroidWakeControl: BLACKOUT brightness restored");
                 } catch (Throwable throwable) {
                     XposedBridge.log("AirDroidWakeControl: cannot restore brightness: "
@@ -370,7 +397,7 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
                     synchronized (BLACKOUT_LOCK) {
                         if (generation == blackoutGeneration) {
                             BLACKOUT_WAKE_LOCKS.clear();
-                            savedBrightnessOverride = Float.NaN;
+                            savedBrightnessOverride = null;
                             panelBlackoutLogged = false;
                             blackoutActive = false;
                             blackoutEnding = false;
@@ -380,6 +407,40 @@ public final class AirDroidWakeHook implements IXposedHookLoadPackage {
                 }
             }, 500L);
         });
+    }
+
+    private static Number zeroBrightnessFor(Number savedBrightness) {
+        if (savedBrightness instanceof Integer) {
+            return Integer.valueOf(0);
+        }
+        if (savedBrightness instanceof Float) {
+            return Float.valueOf(0.0f);
+        }
+        throw new IllegalArgumentException("unsupported brightness override type: "
+                + savedBrightness.getClass().getName());
+    }
+
+    private static void setBrightnessOverride(Object powerManagerService, Number brightness)
+            throws Exception {
+        // Android 10 uses an int in the -1..255 range, while newer Android releases use a
+        // normalized float. Resolve the exact private framework signature instead of relying on
+        // the legacy bridge's boxed-argument method matching.
+        Class<?> parameterType;
+        Object argument;
+        if (brightness instanceof Integer) {
+            parameterType = int.class;
+            argument = brightness.intValue();
+        } else if (brightness instanceof Float) {
+            parameterType = float.class;
+            argument = brightness.floatValue();
+        } else {
+            throw new IllegalArgumentException("unsupported brightness override type: "
+                    + brightness.getClass().getName());
+        }
+        Method method = powerManagerService.getClass().getDeclaredMethod(
+                "setScreenBrightnessOverrideFromWindowManagerInternal", parameterType);
+        method.setAccessible(true);
+        method.invoke(powerManagerService, argument);
     }
 
     private static void log(String action, String sourcePackage, String tag, int flags,

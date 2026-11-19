@@ -17,8 +17,8 @@ tested device.
 > (AirDroid), OnePlus, OPPO/OPlus, OxygenOS, Vector, or LSPosed.
 
 > This module hooks private Android and OxygenOS implementation details. It has
-> only been tested on a OnePlus 8T running Android 13 / OxygenOS 13.1. A ROM or
-> Android update may require new hook mappings.
+> been tested on OnePlus 5T and OnePlus 8T devices running the OxygenOS versions
+> listed below. A ROM or Android update may require new hook mappings.
 
 ## What it does
 
@@ -35,6 +35,7 @@ root request. It only runs when loaded by an Xposed-compatible framework.
 
 ## Compatibility
 
+- Tested: OnePlus 5T, Android 10, OxygenOS 10.
 - Tested: OnePlus 8T, Android 13, OxygenOS 13.1.
 - Tested framework: Vector 2.2 (API 102) with Zygisk.
 - Module interface: legacy Xposed API.
@@ -112,7 +113,7 @@ Windows:
 Output:
 
 ```text
-app/build/outputs/apk/debug/AirDroid-Wake-Control-0.10.0-debug.apk
+app/build/outputs/apk/debug/AirDroid-Wake-Control-0.10.1-debug.apk
 ```
 
 The included `xposed-api-82.jar` is a compile-only dependency. Xposed API
@@ -137,9 +138,10 @@ except the Android system process and installs these hooks:
 - `PowerManagerService.systemReady`: restores the required `PROJECT_MEDIA`
   AppOps.
 
-The display implementation is ROM-specific. In particular, this OxygenOS build
-clamps brightness `0` to the panel minimum while `-1.0` turns the panel off in
-the relevant display path.
+The display implementation is ROM-specific. OxygenOS 10 uses an integer
+backlight value, where `0` turns the panel off. The tested newer OxygenOS
+display path clamps brightness `0` to the panel minimum and uses `-1.0` to keep
+the physical panel off.
 
 ## Security and limitations
 
